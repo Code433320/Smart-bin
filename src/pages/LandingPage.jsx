@@ -23,8 +23,8 @@ const LandingPage = () => {
           <a href="#rewards" className="hover:text-text transition-colors">Rewards</a>
         </div>
         <div className="flex items-center gap-3">
-          <Link to="/admin" className="text-sm font-medium text-text-muted hover:text-text transition-colors hidden md:block">Admin</Link>
-          <Link to="/dashboard" className="bg-primary text-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-2 hover:bg-primary-dark transition-all group shadow-lg shadow-primary/20">
+          <Link to="/login" className="text-sm font-medium text-text-muted hover:text-text transition-colors hidden md:block">Login</Link>
+          <Link to="/login" className="bg-primary text-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-2 hover:bg-primary-dark transition-all group shadow-lg shadow-primary/20">
             Get Started <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
           </Link>
         </div>
@@ -57,7 +57,7 @@ const LandingPage = () => {
             </p>
 
             <div className="flex flex-wrap gap-4 animate-fade-in-up-delay-3">
-              <Link to="/dashboard" className="bg-primary text-white px-8 py-4 rounded-full font-semibold hover:shadow-xl hover:shadow-primary/25 hover:-translate-y-0.5 transition-all">
+              <Link to="/login" className="bg-primary text-white px-8 py-4 rounded-full font-semibold hover:shadow-xl hover:shadow-primary/25 hover:-translate-y-0.5 transition-all">
                 Start Earning Points
               </Link>
               <a href="#how-it-works" className="bg-white text-text px-8 py-4 rounded-full font-semibold hover:shadow-lg transition-all border border-black/5">
@@ -249,7 +249,7 @@ const LandingPage = () => {
               <p className="text-text-muted mb-10 text-lg leading-relaxed max-w-md">
                 Every point you earn is backed by the government. Redeem them for tangible benefits that save you real money.
               </p>
-              <Link to="/dashboard" className="inline-flex bg-primary text-white px-8 py-4 rounded-full font-semibold hover:shadow-xl hover:shadow-primary/25 transition-all group">
+              <Link to="/login" className="inline-flex bg-primary text-white px-8 py-4 rounded-full font-semibold hover:shadow-xl hover:shadow-primary/25 transition-all group">
                 View Your Dashboard <ArrowRight size={18} className="ml-2 group-hover:translate-x-1 transition-transform" />
               </Link>
             </div>
@@ -299,10 +299,10 @@ const LandingPage = () => {
               Join thousands of responsible citizens already earning rewards through smarter waste disposal.
             </p>
             <div className="flex flex-wrap gap-4 justify-center">
-              <Link to="/dashboard" className="bg-white text-primary px-10 py-4 rounded-full font-bold text-lg hover:shadow-xl transition-all group">
+              <Link to="/login" className="bg-white text-primary px-10 py-4 rounded-full font-bold text-lg hover:shadow-xl transition-all group">
                 Start Earning Points <ArrowRight size={20} className="inline ml-2 group-hover:translate-x-1 transition-transform" />
               </Link>
-              <Link to="/admin" className="border-2 border-white/30 text-white px-10 py-4 rounded-full font-bold text-lg hover:bg-white/10 transition-all">
+              <Link to="/login" className="border-2 border-white/30 text-white px-10 py-4 rounded-full font-bold text-lg hover:bg-white/10 transition-all">
                 Admin Portal
               </Link>
             </div>
@@ -321,8 +321,7 @@ const LandingPage = () => {
           </div>
           <p className="text-text-muted text-sm">© 2026 SmartBin · Built with 💚 for a cleaner tomorrow.</p>
           <div className="flex gap-6 text-sm text-text-muted">
-            <Link to="/dashboard" className="hover:text-text transition-colors">Dashboard</Link>
-            <Link to="/admin" className="hover:text-text transition-colors">Admin</Link>
+            <Link to="/login" className="hover:text-text transition-colors">Login</Link>
           </div>
         </div>
       </footer>
