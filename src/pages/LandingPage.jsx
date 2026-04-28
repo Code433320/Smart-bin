@@ -92,21 +92,23 @@ const LandingPage = () => {
                 <div className="w-32 h-32 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
               </div>
             }>
-              <Canvas
-                className="w-full h-full"
-                gl={{ antialias: true, alpha: true }}
-                style={{ background: 'transparent' }}
-              >
-                <PerspectiveCamera makeDefault position={[0, 0, 5]} fov={45} />
-                <ambientLight intensity={0.9} color="#FFF8F0" />
-                <directionalLight position={[5, 8, 5]} intensity={1.5} color="#FFF5E8" castShadow />
-                <pointLight position={[-5, -2, -5]} intensity={0.4} color="#1F7A63" />
+            <Canvas
+              className="w-full h-full"
+              gl={{ antialias: true, alpha: true }}
+              style={{ background: 'transparent' }}
+              shadows
+            >
+              <PerspectiveCamera makeDefault position={[0, 0, 5]} fov={45} />
+              <ambientLight intensity={1.5} />
+              <directionalLight position={[5, 5, 5]} intensity={2} castShadow />
+              <Suspense fallback={null}>
                 <Float speed={1.5} rotationIntensity={0.4} floatIntensity={0.5}>
                   <SmartBinModel scrollProgress={0} />
                 </Float>
                 <ContactShadows position={[0, -1.5, 0]} opacity={0.15} scale={10} blur={3} far={4.5} color="#8A847C" />
-                <Environment preset="apartment" />
-              </Canvas>
+                <Environment preset="city" />
+              </Suspense>
+            </Canvas>
             </Suspense>
 
             {/* Floating labels around the model */}

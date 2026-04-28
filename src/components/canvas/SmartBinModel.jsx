@@ -41,9 +41,10 @@ const SmartBinModel = ({ scrollProgress = 0 }) => {
   return (
     <group ref={group} scale={1.1}>
       {/* Main Body */}
-      <RoundedBox args={[1.4, 2.2, 1.1]} radius={0.12} smoothness={4} castShadow>
+      <mesh castShadow>
+        <boxGeometry args={[1.4, 2.2, 1.1]} />
         <meshStandardMaterial color="#1F7A63" metalness={0.15} roughness={0.65} />
-      </RoundedBox>
+      </mesh>
 
       {/* Front Screen Panel */}
       <mesh position={[0, 0.3, 0.56]}>
@@ -73,9 +74,10 @@ const SmartBinModel = ({ scrollProgress = 0 }) => {
 
       {/* Lid */}
       <group ref={lid} position={[0, 1.1, 0]}>
-        <RoundedBox args={[1.5, 0.08, 1.2]} radius={0.04} position={[0, 0.04, 0]} castShadow>
+        <mesh position={[0, 0.04, 0]} castShadow>
+          <boxGeometry args={[1.5, 0.08, 1.2]} />
           <meshStandardMaterial color="#166B55" metalness={0.2} roughness={0.55} />
-        </RoundedBox>
+        </mesh>
         {/* Lid handle */}
         <mesh position={[0, 0.1, 0]}>
           <boxGeometry args={[0.4, 0.03, 0.08]} />
