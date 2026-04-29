@@ -114,6 +114,25 @@ function transformBinData(data, binsArray = []) {
 }
 
 /**
+ * Update sensor data for a bin (temperature, status, etc.)
+ */
+export async function updateBinData(binId, updates) {
+  // Handle the special 'REAL-SENSOR-01' ID which maps to the 'bin/' root
+  const path = binId === 'REAL-SENSOR-01' ? 'bin' : `bins/${binId}`
+  const binRef = ref(rtdb, path)
+  
+  // Get current data to merge updates
+  const snap = await get(binRef)
+  const current = snap.exists() ? snap.val() : {}
+  
+  await set(binRef, {
+    ...current,
+    ...updates,
+    lastUpdated: new Date().toISOString()
+  })
+}
+
+/**
  * Fetch all bins from Firebase Realtime Database.
  */
 export async function getRTDBBins() {
@@ -357,6 +376,9 @@ export async function seedBinsInRTDB() {
       name: 'Bin 1 — MG Road',
       location: 'MG Road, Zone A',
       fillLevel: 72,
+      temperature: 24.5,
+      humidity: 45,
+      moisture: 12,
       status: 'online',
       wasteType: 'Wet Waste',
       lastUpdated: new Date().toISOString(),
@@ -367,6 +389,9 @@ export async function seedBinsInRTDB() {
       name: 'Bin 2 — Koramangala',
       location: 'Koramangala, Zone B',
       fillLevel: 45,
+      temperature: 26.2,
+      humidity: 42,
+      moisture: 8,
       status: 'online',
       wasteType: 'Dry Waste',
       lastUpdated: new Date().toISOString(),
@@ -377,6 +402,9 @@ export async function seedBinsInRTDB() {
       name: 'Bin 3 — Indiranagar',
       location: 'Indiranagar, Zone C',
       fillLevel: 88,
+      temperature: 28.1,
+      humidity: 50,
+      moisture: 15,
       status: 'critical',
       wasteType: 'Hazardous',
       lastUpdated: new Date().toISOString(),
@@ -387,6 +415,9 @@ export async function seedBinsInRTDB() {
       name: 'Bin 4 — Whitefield',
       location: 'Whitefield, Zone D',
       fillLevel: 30,
+      temperature: 25.5,
+      humidity: 38,
+      moisture: 5,
       status: 'online',
       wasteType: 'Dry Waste',
       lastUpdated: new Date().toISOString(),

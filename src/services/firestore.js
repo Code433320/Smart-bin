@@ -67,18 +67,36 @@ export async function syncRtdbUsersToFirestore(rtdbUsers) {
   for (const [name, data] of Object.entries(rtdbUsers)) {
     const rtdbPoints = data.points || 0
     
-    // 1. Check if ANY user (real or hw) is already linked to this rtdbName
+    // 1. Find the definitive account for this rtdbName
+    // We prioritize registered users over 'hw_...' placeholder docs
     const q = query(collection(db, 'users'), where('rtdbName', '==', name))
     const snap = await getDocs(q)
     
     if (!snap.empty) {
-      // 2. Update existing linked user
-      const userDoc = snap.docs[0]
-      const current = userDoc.data()
-      const saved = current.savedPoints || 0
+      // 2. We found accounts linked to this name.
+      // If there are multiple (e.g. a 'hw_...' doc and a real user doc), 
+      // we prioritize the real user (id doesn't start with 'hw_').
+      let targetDoc = snap.docs.find(d => !d.id.startsWith('hw_')) || snap.docs[0]
+      const hwDoc = snap.docs.find(d => d.id.startsWith('hw_'))
+
+      const current = targetDoc.data()
+      let saved = current.savedPoints || 0
+
+      // MIGRATION: If we have a separate 'hw_...' doc with points, move them to the real user
+      if (hwDoc && targetDoc.id !== hwDoc.id) {
+        const hwData = hwDoc.data()
+        if (hwData.points > 0) {
+          saved += hwData.points
+          console.log(`Migrating ${hwData.points} from ${hwDoc.id} to ${targetDoc.id}`)
+          // Clear the hw doc so we don't migrate again
+          await updateDoc(hwDoc.ref, { points: 0, savedPoints: 0, rtdbName: `migrated_${name}_${Date.now()}` })
+        }
+      }
+
       const totalPoints = saved + rtdbPoints
-      await updateDoc(userDoc.ref, {
+      await updateDoc(targetDoc.ref, {
         points: totalPoints,
+        savedPoints: saved,
         monthlyImpactKg: parseFloat((totalPoints * 0.15).toFixed(1)),
         lastRtdbSnapshot: rtdbPoints,
       })
@@ -147,8 +165,12 @@ export async function getLeaderboard(count = 10) {
 
   const unique = {}
   lb.forEach(u => {
-    const key = u.rtdbName || u.id
-    if (!unique[key] || u.points > unique[key].points) {
+    const key = (u.rtdbName || u.displayName || u.id).toLowerCase().trim()
+    const existing = unique[key]
+    const isNewHw = u.id.startsWith('hw_')
+    const isExistingHw = existing?.id.startsWith('hw_')
+
+    if (!existing || (isExistingHw && !isNewHw) || (isNewHw === isExistingHw && u.points > existing.points)) {
       unique[key] = u
     }
   })
@@ -171,13 +193,22 @@ export function subscribeToFirestoreLeaderboard(count, callback) {
   const unsub = onSnapshot(q, (snap) => {
     const lb = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
-      .filter(u => u.role === 'user')
+      .filter(u => u.role === 'user' && (u.points > 0 || !u.id.startsWith('hw_')))
       
-    // Deduplicate by rtdbName (keep the one with most points)
+    // Deduplicate by rtdbName or displayName (case-insensitive)
     const unique = {}
     lb.forEach(u => {
-      const key = u.rtdbName || u.id
-      if (!unique[key] || u.points > unique[key].points) {
+      const key = (u.rtdbName || u.displayName || u.id).toLowerCase().trim()
+      const existing = unique[key]
+      
+      const isNewHw = u.id.startsWith('hw_')
+      const isExistingHw = existing?.id.startsWith('hw_')
+
+      // Logic: 
+      // - If no entry yet, take it.
+      // - If existing is hardware-only but new one is a REAL user, take the real user (MANDATORY).
+      // - If both are the same type, take the one with more points.
+      if (!existing || (isExistingHw && !isNewHw) || (isNewHw === isExistingHw && u.points > existing.points)) {
         unique[key] = u
       }
     })
@@ -307,10 +338,27 @@ export async function getAlerts(count = 10) {
   const q = query(
     collection(db, 'alerts'),
     orderBy('timestamp', 'desc'),
-    firestoreLimit(count)
+    firestoreLimit(count * 2)
   )
   const snap = await getDocs(q)
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(a => a.resolved === false)
+    .slice(0, count)
+}
+
+export function subscribeToAlerts(callback) {
+  const q = query(
+    collection(db, 'alerts'),
+    orderBy('timestamp', 'desc'),
+    firestoreLimit(20)
+  )
+  return onSnapshot(q, (snap) => {
+    const active = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(a => a.resolved === false)
+    callback(active)
+  })
 }
 
 // ═══════════════════════════════════════════

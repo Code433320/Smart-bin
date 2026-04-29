@@ -3,8 +3,8 @@ import { motion } from 'framer-motion'
 import { Link, useNavigate } from 'react-router'
 import { LayoutDashboard, Users, MapPin, Settings, AlertTriangle, Send, Activity, Trash2, Cpu, LogOut, Database, Wifi, WifiOff, History, Thermometer, Droplets, QrCode, Flame, ShieldCheck, Truck } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
-import { getDashboardStats, getAlerts, addBroadcast, addTemperatureAlert, resolveTemperatureAlert, subscribeToFirestoreLeaderboard } from '../services/firestore'
-import { subscribeToBins, seedBinsInRTDB, subscribeToBinData, computeDisposalStats, subscribeToSharedBin, subscribeToLeaderboard, syncAllRtdbUsers } from '../services/rtdb'
+import { getDashboardStats, getAlerts, subscribeToAlerts, addBroadcast, addTemperatureAlert, resolveTemperatureAlert, subscribeToFirestoreLeaderboard } from '../services/firestore'
+import { subscribeToBins, seedBinsInRTDB, subscribeToBinData, computeDisposalStats, subscribeToSharedBin, subscribeToLeaderboard, syncAllRtdbUsers, updateBinData } from '../services/rtdb'
 import { seedDatabase, patchDemoUsers } from '../services/seedData'
 import { toast } from 'react-hot-toast'
 import BinVisual from '../components/ui/BinVisual'
@@ -26,6 +26,7 @@ const AdminDashboard = () => {
   const navigate = useNavigate()
   const [stats, setStats] = useState(null)
   const [alerts, setAlerts] = useState([])
+  const alertsRef = React.useRef([])
   const [bins, setBins] = useState([])
   const [disposalEvents, setDisposalEvents] = useState([])
   const [broadcastMsg, setBroadcastMsg] = useState('')
@@ -37,55 +38,63 @@ const AdminDashboard = () => {
   const [selectedBin, setSelectedBin] = useState(null)
   const [tempAlerts, setTempAlerts] = useState([]) // Active high-temp alerts
   const [dispatchingCrew, setDispatchingCrew] = useState({}) // Track which alerts have crew dispatched
+  const [users, setUsers] = useState([])
 
   const TEMP_THRESHOLD = 50 // °C — fire risk threshold
+
+  // Track which temp alerts we've already logged to Firestore (avoid duplicates)
+  const loggedTempAlertsRef = React.useRef(new Set())
+  
+  useEffect(() => {
+    alertsRef.current = alerts
+  }, [alerts])
 
   useEffect(() => {
     fetchDashData()
 
-    // Track which temp alerts we've already logged to Firestore (avoid duplicates)
-    const loggedTempAlerts = new Set()
+    // 1. REAL-TIME ALERTS: Keep the sidebar and banners in sync
+    const unsubAlerts = subscribeToAlerts((activeAlerts) => {
+      setAlerts(activeAlerts)
+    })
 
-    // Subscribe to all bins (Shared Hardware + Simulated Bins)
-    const unsub = subscribeToBins((liveBins) => {
+    // 2. REAL-TIME BINS: Monitor sensor data
+    const unsubBins = subscribeToBins((liveBins) => {
       if (!liveBins || liveBins.length === 0) return
       
-      const sharedBin = liveBins.find(b => b.id === 'SHARED-BIN-01') || liveBins[0]
-      
-      // Check for new critical bins to show toast
       const newTempAlerts = []
-      const fill = sharedBin.fillLevel
-      if (fill >= 80) {
-        toast.error(`Critical Alert: Bin is ${fill}% full!`, {
-          id: `alert-shared-bin-${fill}`,
-          icon: '🚨'
-        })
-      }
+      
+      // Monitor ALL bins (hardware + simulated) for temperature alerts
+      liveBins.forEach(bin => {
+        const temp = bin.temperature
+        // Only show alert in banner if it's hot AND there's an active (unresolved) alert in Firestore
+        const activeAlert = alertsRef.current.find(a => a.binId === bin.id && a.category === 'temperature' && !a.resolved)
 
-      // 🔥 TEMPERATURE ALERT: Check if aggregate average temp exceeds threshold
-      const temp = sharedBin.temperature
-      if (temp !== null && temp >= TEMP_THRESHOLD) {
-        newTempAlerts.push({
-          binId: sharedBin.id,
-          binName: sharedBin.name,
-          temperature: temp,
-          location: sharedBin.location,
-        })
-        // Log to Firestore only once per session/trigger
-        if (!loggedTempAlerts.has(sharedBin.id)) {
-          loggedTempAlerts.add(sharedBin.id)
-          addTemperatureAlert(sharedBin.id, sharedBin.name, temp).catch(console.error)
-          toast.error(`🔥 FIRE RISK: Shared Bin is at ${temp.toFixed(1)}°C!`, {
-            id: `temp-shared-bin`,
-            duration: 10000,
-            icon: '🔥'
-          })
+        if (temp !== null && temp >= TEMP_THRESHOLD) {
+          if (activeAlert) {
+            newTempAlerts.push({
+              binId: bin.id,
+              binName: bin.name || bin.id,
+              location: bin.location || 'Primary Site',
+              temperature: temp,
+            })
+          }
+          
+          // Log to Firestore ONLY if we haven't already logged this specific trigger
+          // and there isn't already an active alert for this bin
+          if (!loggedTempAlertsRef.current.has(bin.id) && !activeAlert) {
+            loggedTempAlertsRef.current.add(bin.id)
+            addTemperatureAlert(bin.id, bin.name || bin.id, temp).catch(console.error)
+            toast.error(`🔥 FIRE RISK: ${bin.name || bin.id} is at ${temp.toFixed(1)}°C!`, {
+              id: `temp-alert-${bin.id}`,
+              duration: 10000,
+              icon: '🔥'
+            })
+          }
+        } else if (temp !== null && temp < TEMP_THRESHOLD) {
+          loggedTempAlertsRef.current.delete(bin.id)
         }
-      } else if (temp !== null && temp < TEMP_THRESHOLD) {
-        // Reset the alert tracking if temp drops
-        loggedTempAlerts.delete(sharedBin.id)
-      }
-
+      })
+      
       setTempAlerts(newTempAlerts)
       setBins(liveBins)
     })
@@ -95,11 +104,16 @@ const AdminDashboard = () => {
       setDisposalEvents(events)
     })
 
-    // Subscribe to leaderboard and sync
+    // 3. REAL-TIME LEADERBOARD
     syncAllRtdbUsers().catch(console.error)
     const unsubLb = subscribeToFirestoreLeaderboard(20, (data) => setUsers(data))
 
-    return () => { unsub(); unsubDisposal(); unsubLb() }
+    return () => { 
+      unsubAlerts()
+      unsubBins() 
+      unsubDisposal() 
+      unsubLb() 
+    }
   }, [])
 
   async function fetchDashData() {
@@ -133,8 +147,24 @@ const AdminDashboard = () => {
   }
 
   const handleConfirmAction = async (binId) => {
-    setDispatchingCrew(prev => ({ ...prev, [binId]: 'confirmed' }))
-    toast.success(`✅ Action confirmed for ${binId}. Monitoring temperature.`, { icon: '✅', duration: 5000 })
+    try {
+      setDispatchingCrew(prev => ({ ...prev, [binId]: 'confirmed' }))
+      
+      // Find the active alert for this bin to resolve it
+      const alert = alerts.find(a => a.binId === binId && a.category === 'temperature' && !a.resolved)
+      if (alert) {
+        await resolveTemperatureAlert(alert.id, 'crew_dispatched')
+      }
+
+      // Reset temperature in RTDB to simulate crew fixing it
+      await updateBinData(binId, { temperature: 30.0 + Math.random() * 2 })
+      
+      toast.success(`✅ Action confirmed for ${binId}. Temperature reset.`, { icon: '✅', duration: 5000 })
+      fetchDashData()
+    } catch (err) {
+      console.error('Resolution error:', err)
+      toast.error('Failed to fully resolve alert.')
+    }
   }
 
   const handlePatch = async () => {
@@ -583,12 +613,33 @@ const AdminDashboard = () => {
                       </div>
                     ))}
                     {alerts.length > 0 ? alerts.map((a, i) => (
-                      <div key={a.id || i} className={`p-3 rounded-xl ${a.type === 'critical' ? 'bg-red-50 border border-red-100' :
-                          a.type === 'warning' ? 'bg-amber-50 border border-amber-100' :
-                            'bg-blue-50 border border-blue-100'
-                        }`}>
-                        <p className="text-sm font-semibold text-text">{a.message}</p>
-                        <p className="text-[10px] text-text-muted mt-0.5">{formatAlertTime(a.timestamp)}</p>
+                      <div key={a.id || i} className={`p-4 rounded-xl border ${
+                        a.category === 'temperature' ? 'bg-red-50 border-red-200' :
+                        a.type === 'critical' ? 'bg-red-50 border-red-100' :
+                        a.type === 'warning' ? 'bg-amber-50 border-amber-100' :
+                        'bg-blue-50 border-blue-100'
+                      }`}>
+                        <div className="flex justify-between items-start gap-2">
+                          <div>
+                            <p className="text-sm font-black text-text leading-tight">{a.category === 'temperature' ? '🔥 ' : ''}{a.message}</p>
+                            <p className="text-[10px] text-text-muted mt-1.5 font-bold tracking-tight">{formatAlertTime(a.timestamp)}</p>
+                          </div>
+                          {a.category === 'temperature' && !a.resolved && (
+                            <button 
+                              onClick={() => {
+                                resolveTemperatureAlert(a.id, 'crew_dispatched').then(() => {
+                                  // Also reset the temperature in RTDB
+                                  updateBinData(a.binId, { temperature: 31.5 })
+                                  toast.success('Alert resolved and temperature normalized!', { icon: '✅' })
+                                  fetchDashData() // Refresh alerts
+                                })
+                              }}
+                              className="shrink-0 px-2 py-1.5 bg-red-600 text-white text-[9px] font-black rounded-lg hover:bg-red-700 transition-colors shadow-sm uppercase"
+                            >
+                              Resolve
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )) : bins.filter(b => b.status === 'critical' || b.fillLevel >= 80).length === 0 && (
                       <p className="text-center text-text-muted text-sm py-4">✅ No active alerts</p>

@@ -78,7 +78,7 @@ const UserDashboard = () => {
       lastPointsRef.current = savedSnapshot
     }
 
-    const savedPoints = userProfile?.savedPoints ?? userProfile?.points ?? 0
+    const savedPoints = userProfile?.savedPoints || 0
 
     const unsub = subscribeToUserPoints(rtdbName, (data) => {
       setLiveRtdb(data)
@@ -86,22 +86,23 @@ const UserDashboard = () => {
 
       let newSavedPoints = savedPoints
 
-      // DROP DETECTED: bin was emptied — save peak to savedPoints
+      // DROP DETECTED: bin was emptied (either while online or offline)
       if (currentRtdbPoints < lastPointsRef.current && lastPointsRef.current > 0) {
-        console.log(`Bin emptied! Adding ${lastPointsRef.current} to savedPoints.`)
+        console.log(`Bin reset detected! Saving ${lastPointsRef.current} points.`)
         newSavedPoints = savedPoints + lastPointsRef.current
-        toast.success(`+${lastPointsRef.current} pts saved to your total!`, { icon: '💾' })
+        toast.success(`+${lastPointsRef.current} pts saved to your permanent total!`, { icon: '💾' })
       }
 
-      // Update tracking
+      // Update tracking ref for next comparison
       lastPointsRef.current = currentRtdbPoints
 
-      // Update Firestore: points = total (for leaderboard), savedPoints = accumulated past
+      // True Persistent Total = Accumulated Past + Current Buffer
       const totalPoints = newSavedPoints + currentRtdbPoints
+      
       updateUserProfile(currentUser.uid, {
         savedPoints: newSavedPoints,
         points: totalPoints,
-        monthlyImpactKg: parseFloat((totalPoints * 0.15).toFixed(1)), // Keep weight in sync
+        monthlyImpactKg: parseFloat((totalPoints * 0.15).toFixed(1)),
         lastRtdbSnapshot: currentRtdbPoints,
         lastFillPercent: data?.fillPercent || data?.fill_percent || 0,
         lastTemp: data?.temperature || null,
@@ -110,7 +111,7 @@ const UserDashboard = () => {
       }).catch(console.error)
     })
     return () => unsub()
-  }, [userProfile?.rtdbName, currentUser])
+  }, [userProfile?.rtdbName, currentUser, userProfile?.savedPoints])
 
   const handleLogout = async () => {
     await logout()
@@ -128,27 +129,46 @@ const UserDashboard = () => {
         setLinking(false)
         return
       }
-      await updateUserProfile(currentUser.uid, { rtdbName: linkName.trim() })
+
+      // Check for existing 'hw_...' profile with points to migrate
+      const hwDocId = `hw_${linkName.trim().toLowerCase()}`
+      const hwProfile = await getUserProfile(hwDocId)
+      
+      let pointsToMigrate = 0
+      if (hwProfile && hwProfile.points > 0) {
+        pointsToMigrate = hwProfile.points
+        toast.info(`Migrating ${pointsToMigrate} points from your hardware history...`, { icon: '🚚' })
+      }
+
+      await updateUserProfile(currentUser.uid, { 
+        rtdbName: linkName.trim(),
+        savedPoints: (userProfile?.savedPoints || 0) + pointsToMigrate,
+        points: (userProfile?.points || 0) + pointsToMigrate,
+      })
+      
       await refreshProfile()
-      toast.success('Hardware linked successfully!')
+      toast.success('Hardware linked and points synchronized!')
       setIsLinkingOpen(false)
     } catch (err) {
+      console.error(err)
       toast.error('Failed to link hardware.')
     }
-    setLinking(true)
     setLinking(false)
   }
 
   const profile = userProfile || {}
   const displayName = profile.displayName || currentUser?.displayName || 'Citizen'
-  // Points: Firestore 'savedPoints' (past totals) + RTDB (current session)
-  // This makes the UI snappy as RTDB updates in real-time
+  
+  // Points Logic:
+  // 1. profile.savedPoints = points from all PREVIOUSLY emptied bin sessions
+  // 2. currentSessionPoints = points from the current ACTIVE bin session in RTDB
   const currentSessionPoints = liveRtdb?.points ?? 0
-  const points = (profile.savedPoints || profile.points || 0) + currentSessionPoints
+  const points = (profile.savedPoints || 0) + currentSessionPoints
+  
   const tier = profile.tier || 'BRONZE'
   const streak = profile.streak || 0
   
-  // Impact: 1 point = 0.15kg (100 pts / full bin = 15kg)
+  // Impact: 1 point = 0.15kg
   const monthlyImpactKg = parseFloat((points * 0.15).toFixed(1))
   
   const monthlyGoalKg = 15 // Target one full bin (15kg) per month
