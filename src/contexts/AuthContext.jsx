@@ -22,13 +22,14 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   // Sign up with email/password
-  async function signup(email, password, displayName, role = 'user') {
+  async function signup(email, password, displayName, role = 'user', rtdbName = null) {
     const cred = await createUserWithEmailAndPassword(auth, email, password)
     await updateProfile(cred.user, { displayName })
     const profile = await createUserProfile(cred.user.uid, {
       email,
       displayName,
       role,
+      ...(rtdbName ? { rtdbName } : {}), // Bridge to RTDB user node
     })
     setUserProfile({ id: cred.user.uid, ...profile })
     return cred.user

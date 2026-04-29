@@ -7,9 +7,12 @@ import LoginPage from './pages/LoginPage'
 import UserDashboard from './pages/UserDashboard'
 import AdminDashboard from './pages/AdminDashboard'
 
+import { Toaster } from 'react-hot-toast'
+
 function App() {
   return (
     <AuthProvider>
+      <Toaster position="top-right" reverseOrder={false} />
       <Router>
         <Routes>
           <Route path="/" element={<LandingPage />} />

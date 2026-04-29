@@ -1,7 +1,8 @@
 import {
   doc, getDoc, setDoc, updateDoc, addDoc,
   collection, query, where, orderBy, limit as firestoreLimit,
-  getDocs, serverTimestamp, increment, Timestamp
+  getDocs, serverTimestamp, increment, Timestamp,
+  onSnapshot
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
 
@@ -13,6 +14,7 @@ export async function createUserProfile(uid, data) {
   const userRef = doc(db, 'users', uid)
   const existing = await getDoc(userRef)
   if (!existing.exists()) {
+    // Brand new user — write full profile
     await setDoc(userRef, {
       email: data.email,
       displayName: data.displayName || data.email.split('@')[0],
@@ -26,7 +28,20 @@ export async function createUserProfile(uid, data) {
       totalDisposals: 0,
       photoURL: data.photoURL || null,
       createdAt: serverTimestamp(),
+      // Merge any extra fields (e.g. rtdbName)
+      ...Object.fromEntries(
+        Object.entries(data).filter(([k]) =>
+          !['email','displayName','role','photoURL'].includes(k)
+        )
+      ),
     })
+  } else {
+    // Existing user — only merge fields that are explicitly passed and not already set
+    const current = existing.data()
+    const updates = {}
+    if (data.rtdbName && !current.rtdbName) updates.rtdbName = data.rtdbName
+    if (data.photoURL && !current.photoURL) updates.photoURL = data.photoURL
+    if (Object.keys(updates).length > 0) await updateDoc(userRef, updates)
   }
   return (await getDoc(userRef)).data()
 }
@@ -42,6 +57,73 @@ export async function updateUserProfile(uid, data) {
   await updateDoc(userRef, data)
 }
 
+/**
+ * Sync RTDB hardware users to Firestore so they appear on the leaderboard.
+ * Creates a minimal Firestore doc for each RTDB user who doesn't already have one.
+ */
+export async function syncRtdbUsersToFirestore(rtdbUsers) {
+  if (!rtdbUsers || typeof rtdbUsers !== 'object') return
+  
+  for (const [name, data] of Object.entries(rtdbUsers)) {
+    const rtdbPoints = data.points || 0
+    
+    // 1. Check if ANY user (real or hw) is already linked to this rtdbName
+    const q = query(collection(db, 'users'), where('rtdbName', '==', name))
+    const snap = await getDocs(q)
+    
+    if (!snap.empty) {
+      // 2. Update existing linked user
+      const userDoc = snap.docs[0]
+      const current = userDoc.data()
+      const saved = current.savedPoints || 0
+      const totalPoints = saved + rtdbPoints
+      await updateDoc(userDoc.ref, {
+        points: totalPoints,
+        monthlyImpactKg: parseFloat((totalPoints * 0.15).toFixed(1)),
+        lastRtdbSnapshot: rtdbPoints,
+      })
+    } else {
+      // 3. No one linked? Create a hardware-only user
+      const docId = `hw_${name.toLowerCase()}`
+      const userRef = doc(db, 'users', docId)
+      await setDoc(userRef, {
+        displayName: name,
+        rtdbName: name,
+        role: 'user',
+        points: rtdbPoints,
+        savedPoints: 0,
+        lastRtdbSnapshot: rtdbPoints,
+        tier: 'BRONZE',
+        streak: 0,
+        monthlyImpactKg: parseFloat((rtdbPoints * 0.15).toFixed(1)),
+        isHardwareOnly: true,
+        createdAt: serverTimestamp(),
+      }, { merge: true })
+    }
+  }
+}
+
+/**
+ * Atomically add points to a user's Firestore total.
+ * Used to accumulate RTDB hardware points that get overwritten.
+ */
+/**
+ * Atomically add points to a user's Firestore total.
+ * Also increments impact weight based on hardware stats (1 point = 0.15kg).
+ */
+export async function accumulatePoints(uid, pointsToAdd) {
+  if (!uid || !pointsToAdd || pointsToAdd <= 0) return
+  const userRef = doc(db, 'users', uid)
+  const weightAdded = parseFloat((pointsToAdd * 0.15).toFixed(2))
+  
+  await updateDoc(userRef, {
+    savedPoints: increment(pointsToAdd),
+    points: increment(pointsToAdd),
+    totalDisposals: increment(1),
+    monthlyImpactKg: increment(weightAdded),
+  })
+}
+
 function computeTier(points) {
   if (points >= 10000) return 'GOLD'
   if (points >= 5000) return 'SILVER'
@@ -55,16 +137,67 @@ function computeTier(points) {
 export async function getLeaderboard(count = 10) {
   const q = query(
     collection(db, 'users'),
-    where('role', '==', 'user'),
     orderBy('points', 'desc'),
-    firestoreLimit(count)
+    firestoreLimit(count * 2) // Fetch more to account for filtering
   )
   const snap = await getDocs(q)
-  return snap.docs.map((d, i) => ({
-    id: d.id,
-    rank: i + 1,
-    ...d.data(),
-  }))
+  const lb = snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(u => u.role === 'user')
+
+  const unique = {}
+  lb.forEach(u => {
+    const key = u.rtdbName || u.id
+    if (!unique[key] || u.points > unique[key].points) {
+      unique[key] = u
+    }
+  })
+
+  return Object.values(unique)
+    .sort((a, b) => b.points - a.points)
+    .slice(0, count)
+    .map((u, i) => ({ ...u, rank: i + 1 }))
+}
+
+/**
+ * Real-time leaderboard from Firestore (persistent, not overwritten).
+ */
+export function subscribeToFirestoreLeaderboard(count, callback) {
+  const q = query(
+    collection(db, 'users'),
+    orderBy('points', 'desc'),
+    firestoreLimit(count ? count * 2 : 20)
+  )
+  const unsub = onSnapshot(q, (snap) => {
+    const lb = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(u => u.role === 'user')
+      
+    // Deduplicate by rtdbName (keep the one with most points)
+    const unique = {}
+    lb.forEach(u => {
+      const key = u.rtdbName || u.id
+      if (!unique[key] || u.points > unique[key].points) {
+        unique[key] = u
+      }
+    })
+
+    const finalLb = Object.values(unique)
+      .sort((a, b) => b.points - a.points)
+      .slice(0, count || 10)
+      .map((data, i) => {
+        return {
+          ...data,
+          rank: i + 1,
+          displayName: data.displayName || data.rtdbName || 'Citizen',
+          points: data.points || 0,
+          rtdbName: data.rtdbName || null,
+          impactKg: (data.monthlyImpactKg || (data.points || 0) * 0.15).toFixed(1),
+        }
+      })
+    callback(finalLb)
+  })
+  return unsub
 }
 
 // ═══════════════════════════════════════════
@@ -209,13 +342,16 @@ export async function getDashboardStats() {
   // Total waste logs
   const logsSnap = await getDocs(collection(db, 'wasteLogs'))
   const totalLogs = logsSnap.size
-  const totalWeightTons = (totalLogs * 0.3) / 1000 // rough estimate
-
   // Total points issued (real users only)
   let totalPoints = 0
   realUsers.forEach(d => {
     totalPoints += d.data().points || 0
   })
+
+  const totalWeightKg = totalPoints * 0.15
+  const totalWeightDisplay = totalWeightKg >= 1000 
+    ? `${(totalWeightKg / 1000).toFixed(1)} Tons`
+    : `${totalWeightKg.toFixed(0)} KG`
 
   // Active alerts
   const alertsSnap = await getDocs(
@@ -239,7 +375,7 @@ export async function getDashboardStats() {
 
   return {
     totalCitizens,
-    wasteProcessed: `${totalWeightTons.toFixed(1)} Tons`,
+    wasteProcessed: totalWeightDisplay,
     pointsIssued: totalPoints >= 1000 ? `${(totalPoints / 1000).toFixed(0)}K` : totalPoints.toString(),
     activeAlerts: alertsSnap.size,
     binsOnline: binsSnap.size,
@@ -250,4 +386,59 @@ export async function getDashboardStats() {
     },
     accuracy: 98.4,
   }
+}
+
+// ═══════════════════════════════════════════
+// BROADCAST SUBSCRIPTION (Real-time for Users)
+// ═══════════════════════════════════════════
+
+/**
+ * Subscribe to broadcast messages in real-time.
+ * Users will receive notifications as they arrive.
+ */
+export function subscribeToBroadcasts(callback) {
+  const q = query(
+    collection(db, 'broadcasts'),
+    orderBy('timestamp', 'desc'),
+    firestoreLimit(20)
+  )
+  const unsub = onSnapshot(q, (snap) => {
+    const broadcasts = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    callback(broadcasts)
+  })
+  return unsub
+}
+
+// ═══════════════════════════════════════════
+// TEMPERATURE ALERT SYSTEM
+// ═══════════════════════════════════════════
+
+/**
+ * Log a high-temperature alert when a bin exceeds 50°C.
+ */
+export async function addTemperatureAlert(binId, binName, temperature) {
+  return await addDoc(collection(db, 'alerts'), {
+    type: 'critical',
+    category: 'temperature',
+    binId,
+    binName: binName || binId,
+    temperature,
+    message: `🔥 FIRE RISK: ${binName || binId} recorded ${temperature}°C`,
+    resolved: false,
+    crewDispatched: false,
+    timestamp: serverTimestamp(),
+  })
+}
+
+/**
+ * Mark a temperature alert as resolved with action details.
+ */
+export async function resolveTemperatureAlert(alertId, action = 'crew_dispatched') {
+  const alertRef = doc(db, 'alerts', alertId)
+  await updateDoc(alertRef, {
+    resolved: true,
+    crewDispatched: action === 'crew_dispatched',
+    resolvedAt: serverTimestamp(),
+    actionTaken: action,
+  })
 }

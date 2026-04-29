@@ -1,9 +1,12 @@
-import React, { useState, useEffect } from 'react'
-import { motion } from 'framer-motion'
+import React, { useState, useEffect, useRef } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { Trophy, Flame, Zap, Award, ArrowUpRight, History, Bell, ArrowLeft, LogOut } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
-import { getLeaderboard, getUserWasteLogs, getRewards } from '../services/firestore'
+import { getRewards, updateUserProfile, subscribeToBroadcasts, accumulatePoints, subscribeToFirestoreLeaderboard, getLeaderboard } from '../services/firestore'
+import { subscribeToUserPoints, validateRtdbUser, subscribeToBinData, syncAllRtdbUsers } from '../services/rtdb'
+import { Cpu, CheckCircle2, AlertCircle, X, Megaphone } from 'lucide-react'
+import { toast } from 'react-hot-toast'
 
 const UserDashboard = () => {
   const { currentUser, userProfile, logout, refreshProfile } = useAuth()
@@ -12,54 +15,157 @@ const UserDashboard = () => {
   const [recentLogs, setRecentLogs] = useState([])
   const [rewards, setRewards] = useState([])
   const [loadingData, setLoadingData] = useState(true)
+  const [liveRtdb, setLiveRtdb] = useState(null)
+  const [linking, setLinking] = useState(false)
+  const [linkName, setLinkName] = useState('')
+  const [isLinkingOpen, setIsLinkingOpen] = useState(false)
+  const [broadcasts, setBroadcasts] = useState([])
+  const [showNotifications, setShowNotifications] = useState(false)
+  const [seenBroadcastCount, setSeenBroadcastCount] = useState(0)
 
   useEffect(() => {
-    async function fetchData() {
+    let unsubLb = () => {}
+    // 1. Fetch rewards and sync users
+    async function init() {
       try {
-        const [lb, logs, rw] = await Promise.all([
-          getLeaderboard(6),
-          currentUser ? getUserWasteLogs(currentUser.uid, 4) : [],
+        await syncAllRtdbUsers() // Ensure Pramod and others are in Firestore
+        const [rw, fsUsers] = await Promise.all([
           getRewards(),
+          getLeaderboard(20)
         ])
-        setLeaderboard(lb)
-        setRecentLogs(logs)
         setRewards(rw)
-      } catch (err) {
-        console.error('Dashboard fetch error:', err)
-      }
+        // 2. True leaderboard: Firestore persistent data
+        unsubLb = subscribeToFirestoreLeaderboard(20, (data) => setLeaderboard(data))
+      } catch (err) { console.error('Init error:', err) }
       setLoadingData(false)
     }
-    fetchData()
-  }, [currentUser])
+    init()
+
+    // 3. Recent activity
+    const unsubActivity = subscribeToBinData((data) => setRecentLogs(data.slice(0, 5)))
+
+    // 4. Broadcast notifications
+    let isFirstLoad = true
+    const unsubBroadcast = subscribeToBroadcasts((data) => {
+      setBroadcasts(data)
+      if (!isFirstLoad && data.length > 0) {
+        const latest = data[0]
+        toast(latest.message, { id: `broadcast-${latest.id}`, icon: '📢', duration: 6000 })
+      }
+      isFirstLoad = false
+    })
+
+    return () => {
+      unsubLb()
+      unsubActivity()
+      unsubBroadcast()
+    }
+  }, [])
+
+  // ═══ POINTS PERSISTENCE ═══
+  // savedPoints = accumulated total from ALL past sessions
+  // points = savedPoints + current RTDB (always the TRUE total, used by leaderboard)
+  // lastRtdbSnapshot = raw RTDB value (for drop detection)
+  const lastPointsRef = useRef(null)
+
+  useEffect(() => {
+    const rtdbName = userProfile?.rtdbName
+    if (!rtdbName || !currentUser) return
+
+    // Initialize from Firestore's last known RTDB value
+    const savedSnapshot = userProfile?.lastRtdbSnapshot ?? 0
+    if (lastPointsRef.current === null) {
+      lastPointsRef.current = savedSnapshot
+    }
+
+    const savedPoints = userProfile?.savedPoints ?? userProfile?.points ?? 0
+
+    const unsub = subscribeToUserPoints(rtdbName, (data) => {
+      setLiveRtdb(data)
+      const currentRtdbPoints = data?.points || 0
+
+      let newSavedPoints = savedPoints
+
+      // DROP DETECTED: bin was emptied — save peak to savedPoints
+      if (currentRtdbPoints < lastPointsRef.current && lastPointsRef.current > 0) {
+        console.log(`Bin emptied! Adding ${lastPointsRef.current} to savedPoints.`)
+        newSavedPoints = savedPoints + lastPointsRef.current
+        toast.success(`+${lastPointsRef.current} pts saved to your total!`, { icon: '💾' })
+      }
+
+      // Update tracking
+      lastPointsRef.current = currentRtdbPoints
+
+      // Update Firestore: points = total (for leaderboard), savedPoints = accumulated past
+      const totalPoints = newSavedPoints + currentRtdbPoints
+      updateUserProfile(currentUser.uid, {
+        savedPoints: newSavedPoints,
+        points: totalPoints,
+        monthlyImpactKg: parseFloat((totalPoints * 0.15).toFixed(1)), // Keep weight in sync
+        lastRtdbSnapshot: currentRtdbPoints,
+        lastFillPercent: data?.fillPercent || data?.fill_percent || 0,
+        lastTemp: data?.temperature || null,
+      }).then(() => {
+        if (newSavedPoints !== savedPoints) refreshProfile()
+      }).catch(console.error)
+    })
+    return () => unsub()
+  }, [userProfile?.rtdbName, currentUser])
 
   const handleLogout = async () => {
     await logout()
     navigate('/')
   }
 
+  const handleLinkHardware = async (e) => {
+    e.preventDefault()
+    if (!linkName.trim()) return
+    setLinking(true)
+    try {
+      const exists = await validateRtdbUser(linkName.trim())
+      if (!exists) {
+        toast.error(`Name "${linkName}" not found in hardware registry.`)
+        setLinking(false)
+        return
+      }
+      await updateUserProfile(currentUser.uid, { rtdbName: linkName.trim() })
+      await refreshProfile()
+      toast.success('Hardware linked successfully!')
+      setIsLinkingOpen(false)
+    } catch (err) {
+      toast.error('Failed to link hardware.')
+    }
+    setLinking(true)
+    setLinking(false)
+  }
+
   const profile = userProfile || {}
   const displayName = profile.displayName || currentUser?.displayName || 'Citizen'
-  const points = profile.points || 0
+  // Points: Firestore 'savedPoints' (past totals) + RTDB (current session)
+  // This makes the UI snappy as RTDB updates in real-time
+  const currentSessionPoints = liveRtdb?.points ?? 0
+  const points = (profile.savedPoints || profile.points || 0) + currentSessionPoints
   const tier = profile.tier || 'BRONZE'
   const streak = profile.streak || 0
-  const monthlyImpactKg = profile.monthlyImpactKg || 0
-  const monthlyGoalKg = profile.monthlyGoalKg || 5
+  
+  // Impact: 1 point = 0.15kg (100 pts / full bin = 15kg)
+  const monthlyImpactKg = parseFloat((points * 0.15).toFixed(1))
+  
+  const monthlyGoalKg = 15 // Target one full bin (15kg) per month
   const impactPercent = Math.min(Math.round((monthlyImpactKg / monthlyGoalKg) * 100), 100)
 
-  // Find current user rank in leaderboard
-  const myRank = leaderboard.findIndex(u => u.id === currentUser?.uid)
+  // Find current user rank in Firestore leaderboard
+  const myRank = leaderboard.findIndex(u => u.id === currentUser?.uid || u.displayName === userProfile?.rtdbName)
   const rankDisplay = myRank >= 0 ? `#${myRank + 1}` : '--'
 
-  const dotColors = { 'Wet Waste': 'bg-primary', 'Dry Waste': 'bg-blue-500', 'Hazardous': 'bg-red-500' }
+  const dotColors = { 'Wet Waste': 'bg-primary', 'Dry Waste': 'bg-blue-500', 'Hazardous': 'bg-red-500', 'Dry': 'bg-blue-500', 'Wet': 'bg-primary' }
 
   function formatLogDate(timestamp) {
-    if (!timestamp) return ''
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp)
-    const now = new Date()
-    const diff = now - date
-    if (diff < 86400000) return `Today, ${date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
-    if (diff < 172800000) return `Yesterday, ${date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
-    return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) + `, ${date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
+    if (!timestamp) return 'Just now'
+    // If timestamp is from device boot (relative), show relative time
+    if (typeof timestamp === 'number' && timestamp < 1000000) return `${timestamp}s ago`
+    const date = new Date(timestamp)
+    return date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
   }
 
   if (loadingData) {
@@ -83,10 +189,46 @@ const UserDashboard = () => {
           </div>
         </div>
         <div className="flex gap-3">
-          <button className="w-10 h-10 rounded-xl bg-surface flex items-center justify-center relative hover:bg-surface-warm transition-colors">
-            <Bell size={18} className="text-text-muted" />
-            <span className="absolute top-2.5 right-2.5 w-2 h-2 bg-primary rounded-full"></span>
-          </button>
+          <div className="relative">
+            <button onClick={() => { setShowNotifications(!showNotifications); setSeenBroadcastCount(broadcasts.length) }}
+              className="w-10 h-10 rounded-xl bg-surface flex items-center justify-center relative hover:bg-surface-warm transition-colors">
+              <Bell size={18} className="text-text-muted" />
+              {broadcasts.length > seenBroadcastCount && (
+                <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[9px] font-black rounded-full flex items-center justify-center animate-bounce">
+                  {broadcasts.length - seenBroadcastCount}
+                </span>
+              )}
+            </button>
+
+            {/* Notifications Dropdown */}
+            <AnimatePresence>
+              {showNotifications && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                  className="absolute right-0 top-12 w-80 bg-white rounded-2xl shadow-2xl border border-black/10 z-50 overflow-hidden"
+                >
+                  <div className="p-4 border-b border-black/5 flex justify-between items-center">
+                    <h4 className="font-bold text-sm flex items-center gap-2"><Megaphone size={14} className="text-primary" /> Notifications</h4>
+                    <button onClick={() => setShowNotifications(false)}><X size={16} className="text-text-muted" /></button>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto">
+                    {broadcasts.length > 0 ? broadcasts.map((b, i) => (
+                      <div key={b.id || i} className="p-4 border-b border-black/5 last:border-0 hover:bg-surface/50 transition-colors">
+                        <p className="text-sm font-medium text-text">{b.message}</p>
+                        <p className="text-[10px] text-text-muted mt-1">
+                          {b.zone || 'All Zones'} · {b.timestamp?.toDate ? b.timestamp.toDate().toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : 'Just now'}
+                        </p>
+                      </div>
+                    )) : (
+                      <p className="p-6 text-center text-text-muted text-sm">No notifications yet</p>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
           <div className="bg-surface flex items-center gap-3 px-4 py-2 rounded-xl">
             <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-primary to-green-300" />
             <span className="font-semibold text-sm text-text">Rank {rankDisplay}</span>
@@ -111,13 +253,20 @@ const UserDashboard = () => {
                   <p className="text-2xl font-heading font-black mt-0.5">{tier}</p>
                 </div>
               </div>
-              <div className="mb-8">
+              <div className="mb-4">
                 <p className="text-white/50 text-xs font-medium mb-1">Total Points</p>
                 <div className="flex items-baseline gap-2">
                   <h2 className="text-5xl font-heading font-black tracking-tight">{points.toLocaleString()}</h2>
                   <span className="text-white/60 font-bold text-sm">PTS</span>
                 </div>
               </div>
+              {/* Live RTDB indicator */}
+              {liveRtdb && (
+                <div className="mb-4 bg-white/10 rounded-xl px-3 py-2 flex items-center gap-2">
+                  <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  <span className="text-[10px] text-white/70 font-bold uppercase tracking-wide">Live · {userProfile?.rtdbName}</span>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-white/10 p-3 rounded-xl">
                   <p className="text-[10px] text-white/50 mb-1">Streak</p>
@@ -130,6 +279,33 @@ const UserDashboard = () => {
               </div>
             </div>
           </motion.div>
+
+          {/* Link Hardware Prompt for existing users */}
+          {!userProfile?.rtdbName && (
+            <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}
+              className="bg-white p-6 rounded-2xl border-2 border-dashed border-primary/20 flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mb-4">
+                <Cpu size={24} className="text-primary" />
+              </div>
+              <h4 className="font-bold text-sm mb-1">Connect your SmartBin</h4>
+              <p className="text-xs text-text-muted mb-4">Link your hardware-registered name to see live points and sensor data.</p>
+              
+              {isLinkingOpen ? (
+                <form onSubmit={handleLinkHardware} className="w-full space-y-3">
+                  <input type="text" value={linkName} onChange={(e) => setLinkName(e.target.value)} placeholder="e.g. Akshat"
+                    className="w-full bg-surface border border-black/5 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" required />
+                  <div className="flex gap-2">
+                    <button type="submit" disabled={linking} className="flex-1 bg-primary text-white py-2 rounded-xl text-xs font-bold disabled:opacity-50">
+                      {linking ? 'Linking...' : 'Confirm Link'}
+                    </button>
+                    <button type="button" onClick={() => setIsLinkingOpen(false)} className="px-4 py-2 bg-surface rounded-xl text-xs font-bold text-text-muted">Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <button onClick={() => setIsLinkingOpen(true)} className="bg-primary text-white px-6 py-2 rounded-xl text-xs font-bold hover:shadow-lg transition-all">Link Now</button>
+              )}
+            </motion.div>
+          )}
 
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}
             className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
@@ -161,7 +337,7 @@ const UserDashboard = () => {
             </div>
             <div className="space-y-3">
               {leaderboard.map((user, i) => {
-                const isMe = user.id === currentUser?.uid
+                const isMe = user.displayName === userProfile?.rtdbName || user.id === currentUser?.uid
                 return (
                   <motion.div key={user.id} whileHover={{ x: 4 }}
                     className={`flex items-center justify-between p-4 rounded-2xl transition-colors ${isMe ? 'bg-primary/10 border border-primary/20' : 'hover:bg-surface'}`}>
@@ -172,7 +348,10 @@ const UserDashboard = () => {
                         {isMe && <span className="ml-2 text-[10px] font-bold text-primary bg-primary/10 px-2 py-0.5 rounded-full">You</span>}
                       </div>
                     </div>
-                    <span className="font-bold text-sm text-text-muted">{(user.points || 0).toLocaleString()}</span>
+                    <div className="text-right">
+                      <span className="font-bold text-sm text-text">{(user.impactKg || 0)} kg</span>
+                      <p className="text-[10px] text-text-muted font-medium">{(user.points || 0).toLocaleString()} pts</p>
+                    </div>
                   </motion.div>
                 )
               })}
@@ -194,10 +373,10 @@ const UserDashboard = () => {
                     <div className={`w-2 h-2 rounded-full ${dotColors[log.wasteType] || 'bg-gray-400'}`} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-semibold text-text">{log.wasteType}</p>
+                    <p className="text-sm font-semibold text-text">{log.wasteType || 'Waste Disposal'}</p>
                     <p className="text-[10px] text-text-muted">{formatLogDate(log.timestamp)}</p>
                   </div>
-                  <span className="text-primary font-bold text-xs">+{log.pointsEarned}</span>
+                  <span className="text-primary font-bold text-xs">+{log.pointsAwarded}</span>
                 </div>
               )) : <p className="text-center text-text-muted text-sm py-4">No activity yet</p>}
             </div>
@@ -207,10 +386,6 @@ const UserDashboard = () => {
             className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm text-center">
             <p className="text-[10px] text-text-muted uppercase font-bold tracking-widest mb-2">Monthly Impact</p>
             <h4 className="text-2xl font-bold text-text">{monthlyImpactKg.toFixed(1)} kg <span className="text-primary">Saved</span></h4>
-            <div className="mt-4 h-2 bg-surface rounded-full overflow-hidden">
-              <motion.div initial={{ width: 0 }} animate={{ width: `${impactPercent}%` }} transition={{ duration: 1.2, delay: 0.8 }} className="h-full bg-primary rounded-full" />
-            </div>
-            <p className="text-[10px] text-text-muted mt-2">{impactPercent}% of monthly goal reached</p>
           </motion.div>
         </div>
       </div>

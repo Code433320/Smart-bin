@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Recycle, ShieldCheck, User, ArrowRight, Eye, EyeOff, Leaf } from 'lucide-react'
+import { Recycle, ShieldCheck, User, ArrowRight, Eye, EyeOff, Leaf, Cpu } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { validateRtdbUser } from '../services/rtdb'
 
 const LoginPage = () => {
   const navigate = useNavigate()
@@ -12,6 +13,7 @@ const LoginPage = () => {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
+  const [rtdbName, setRtdbName] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -22,7 +24,16 @@ const LoginPage = () => {
     setLoading(true)
     try {
       if (mode === 'signup') {
-        await signup(email, password, displayName, role)
+        // For citizen signup: validate the hardware name exists in RTDB
+        if (role === 'user' && rtdbName) {
+          const exists = await validateRtdbUser(rtdbName)
+          if (!exists) {
+            setError(`Name "${rtdbName}" not found in the SmartBin hardware registry. Check your registered name.`)
+            setLoading(false)
+            return
+          }
+        }
+        await signup(email, password, displayName, role, rtdbName || null)
         navigate(role === 'admin' ? '/admin' : '/dashboard')
       } else {
         const { profile } = await login(email, password)
@@ -107,11 +118,23 @@ const LoginPage = () => {
 
             <form onSubmit={handleSubmit} className="space-y-5">
               {mode === 'signup' && (
-                <div>
-                  <label className="text-xs font-bold text-text-muted uppercase tracking-wider block mb-2">Full Name</label>
-                  <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Arjun Sharma"
-                    className="w-full bg-white border border-black/8 rounded-xl px-4 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all placeholder:text-text-muted/40" required />
-                </div>
+                <>
+                  <div>
+                    <label className="text-xs font-bold text-text-muted uppercase tracking-wider block mb-2">Full Name</label>
+                    <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Arjun Sharma"
+                      className="w-full bg-white border border-black/8 rounded-xl px-4 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all placeholder:text-text-muted/40" required />
+                  </div>
+                  {role === 'user' && (
+                    <div>
+                      <label className="text-xs font-bold text-text-muted uppercase tracking-wider block mb-2 flex items-center gap-2">
+                        <Cpu size={12} /> Hardware Registered Name
+                      </label>
+                      <input type="text" value={rtdbName} onChange={(e) => setRtdbName(e.target.value)} placeholder="e.g. Pramod"
+                        className="w-full bg-white border border-black/8 rounded-xl px-4 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all placeholder:text-text-muted/40" />
+                      <p className="text-[10px] text-text-muted mt-1.5">This is the name registered with the SmartBin hardware. Leave blank if not yet assigned.</p>
+                    </div>
+                  )}
+                </>
               )}
               <div>
                 <label className="text-xs font-bold text-text-muted uppercase tracking-wider block mb-2">Email</label>
